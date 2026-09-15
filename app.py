@@ -2,12 +2,21 @@ import os
 import threading
 import uuid
 
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import (
+    Flask,
+    render_template,
+    request,
+    jsonify,
+    send_file,
+)
 
 from image_finder import process_excel
 
 
 app = Flask(__name__)
+
+# 20 MB max upload — protects against accidental huge files
+app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024
 
 UPLOAD_FOLDER = "uploads"
 OUTPUT_FOLDER = "outputs"
@@ -38,7 +47,6 @@ def start_job():
             "error": "No Excel file selected."
         }), 400
 
-    # Generate unique job ID
     job_id = str(uuid.uuid4())
 
     input_filename = file.filename
@@ -72,7 +80,7 @@ def start_job():
         "status": "starting",
         "logs": [],
         "result": None,
-        "error": None
+        "error": None,
     }
 
     thread = threading.Thread(
@@ -83,16 +91,14 @@ def start_job():
             listing_language,
             translate_to_english,
             brand_filter,
-            site_filter
+            site_filter,
         ),
-        daemon=True
+        daemon=True,
     )
 
     thread.start()
 
-    return jsonify({
-        "job_id": job_id
-    })
+    return jsonify({"job_id": job_id})
 
 
 def run_job(
@@ -101,7 +107,7 @@ def run_job(
     listing_language,
     translate_to_english,
     brand_filter,
-    site_filter
+    site_filter,
 ):
 
     def log(message):
@@ -134,7 +140,7 @@ def run_job(
             translate_to_english=translate_to_english,
             brand_filter=brand_filter,
             site_filter=site_filter,
-            log_func=log
+            log_func=log,
         )
 
         jobs[job_id]["result"] = result
@@ -156,9 +162,7 @@ def run_job(
 def job_status(job_id):
 
     if job_id not in jobs:
-        return jsonify({
-            "error": "Job not found."
-        }), 404
+        return jsonify({"error": "Job not found."}), 404
 
     job = jobs[job_id]
 
@@ -166,7 +170,7 @@ def job_status(job_id):
         "status": job["status"],
         "logs": job["logs"],
         "error": job["error"],
-        "result": job["result"]
+        "result": job["result"],
     })
 
 
@@ -187,10 +191,13 @@ def download(job_id):
     return send_file(
         result,
         as_attachment=True,
-        download_name=os.path.basename(result)
+        download_name=os.path.basename(result),
     )
+
 
 from waitress import serve
 
 if __name__ == "__main__":
-    serve(app, host="0.0.0.0", port=5000)
+    # Render (and most PaaS providers) inject PORT at runtime.
+    port = int(os.environ.get("PORT", 5000))
+    serve(app, host="0.0.0.0", port=port)
