@@ -25,7 +25,7 @@ if TUNNEL_URL and PROXY_USER and PROXY_PASS:
     else:
         hostport = TUNNEL_URL.replace("https://", "").replace("http://", "").rstrip("/")
 
-    # socks5h -> DNS resolved by the proxy (phone), not by Render
+    # HTTP proxy (Every Proxy HTTP mode) — handles DNS on the proxy side
     proxy_url = f"http://{user}:{passwd}@{hostport}"
     os.environ["HTTP_PROXY"] = proxy_url
     os.environ["HTTPS_PROXY"] = proxy_url
@@ -39,7 +39,7 @@ logging.basicConfig(
 log = logging.getLogger("app")
 
 if TUNNEL_URL and PROXY_USER and PROXY_PASS:
-    log.info("Proxy configured: socks5h://%s@%s", PROXY_USER, TUNNEL_URL)
+    log.info("Proxy configured: http://%s@%s", PROXY_USER, TUNNEL_URL)
 else:
     log.info("No proxy configured — running direct")
 
@@ -78,6 +78,7 @@ JOB_HTML = """
  .running { background:#fff3cd; }
  .done    { background:#d4edda; }
  .error   { background:#f8d7da; }
+ button { padding: 8px 16px; cursor: pointer; margin-right: 8px; }
 </style>
 {% if job.status == 'running' %}<meta http-equiv="refresh" content="2">{% endif %}
 </head><body>
@@ -85,11 +86,15 @@ JOB_HTML = """
   <div class="status {{ job.status }}">Status: {{ job.status }}</div>
 
   {% if job.status == 'done' %}
-    <p><a href="/download/{{ job_id }}"><button>Download Excel</button></a></p>
+    <p>
+      <a href="/download/{{ job_id }}"><button>Download Excel</button></a>
+      <a href="/"><button>Upload Another File</button></a>
+    </p>
   {% endif %}
 
   {% if job.error %}
     <p style="color:red"><b>Error:</b> {{ job.error }}</p>
+    <p><a href="/"><button>Try Again</button></a></p>
   {% endif %}
 
   <h3>Log</h3>

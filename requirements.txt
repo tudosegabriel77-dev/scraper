@@ -1,7 +1,7 @@
 Flask
 waitress
 pandas
-requests[socks]
+requests
 urllib3
 Pillow
 openpyxl
