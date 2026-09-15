@@ -38,7 +38,7 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-VERIFY_SSL = False
+VERIFY_SSL = True
 
 # ---- Optional residential proxy for Bing search ----
 # Set PROXY_URL in Render env vars, e.g.
