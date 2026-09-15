@@ -1,54 +1,179 @@
 import os
+import uuid
+import logging
+import threading
 import tempfile
-from flask import Flask, request, send_file, render_template_string
+import traceback
+
+from flask import Flask, request, send_file, render_template_string, redirect, url_for, abort
 from waitress import serve
+
 from image_finder import process_excel
+
+# ---------------- logging to stdout (shows in Render logs) ----------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+log = logging.getLogger("app")
 
 app = Flask(__name__)
 
-HTML_FORM = """
+# In-memory job store. Fine for a single-instance Render service.
+# Each job: {"status": str, "logs": [str], "file": path|None, "error": str|None}
+JOBS = {}
+JOBS_LOCK = threading.Lock()
+
+
+# ---------------- HTML ----------------
+UPLOAD_HTML = """
 <!doctype html>
-<html>
-<head><title>Image Finder</title></head>
-<body>
-  <h1>Upload Excel File</h1>
+<html><head><title>Image Finder</title>
+<style>
+ body { font-family: system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; }
+ input[type=file] { margin: 10px 0; }
+ button { padding: 8px 16px; cursor: pointer; }
+</style>
+</head><body>
+  <h1>Excel Article &rarr; Image Finder</h1>
   <form action="/process" method="post" enctype="multipart/form-data">
     <input type="file" name="file" accept=".xlsx,.xls" required>
-    <input type="submit" value="Process">
+    <br>
+    <button type="submit">Process</button>
   </form>
-</body>
-</html>
+</body></html>
 """
 
-@app.route('/')
+JOB_HTML = """
+<!doctype html>
+<html><head><title>Job {{ job_id }}</title>
+<style>
+ body { font-family: system-ui, sans-serif; max-width: 900px; margin: 40px auto; padding: 0 16px; }
+ pre { background:#111; color:#0f0; padding:12px; border-radius:6px; max-height: 60vh; overflow:auto; font-size:12px; }
+ .status { padding:6px 12px; border-radius:6px; display:inline-block; }
+ .running { background:#fff3cd; }
+ .done    { background:#d4edda; }
+ .error   { background:#f8d7da; }
+</style>
+{% if job.status == 'running' %}<meta http-equiv="refresh" content="2">{% endif %}
+</head><body>
+  <h1>Job {{ job_id }}</h1>
+  <div class="status {{ job.status }}">Status: {{ job.status }}</div>
+
+  {% if job.status == 'done' %}
+    <p><a href="/download/{{ job_id }}"><button>Download Excel</button></a></p>
+  {% endif %}
+
+  {% if job.error %}
+    <p style="color:red"><b>Error:</b> {{ job.error }}</p>
+  {% endif %}
+
+  <h3>Log</h3>
+  <pre>{{ log_text }}</pre>
+</body></html>
+"""
+
+
+# ---------------- routes ----------------
+@app.route("/")
 def index():
-    return render_template_string(HTML_FORM)
+    return render_template_string(UPLOAD_HTML)
 
-@app.route('/process', methods=['POST'])
+
+@app.route("/process", methods=["POST"])
 def process():
-    if 'file' not in request.files:
+    if "file" not in request.files:
         return "No file part", 400
-    file = request.files['file']
-    if file.filename == '':
+    file = request.files["file"]
+    if file.filename == "":
         return "No selected file", 400
-    if file:
-        temp_dir = tempfile.mkdtemp()
-        input_path = os.path.join(temp_dir, file.filename)
-        output_dir = os.path.join(temp_dir, "output")
-        os.makedirs(output_dir, exist_ok=True)
-        file.save(input_path)
 
-        try:
-            output_excel = process_excel(input_path, output_dir, log_func=print)
-            return send_file(
-                output_excel,
-                as_attachment=True,
-                download_name=os.path.basename(output_excel)
-            )
-        except Exception as e:
-            return f"Error: {str(e)}", 500
+    job_id = uuid.uuid4().hex[:12]
+    with JOBS_LOCK:
+        JOBS[job_id] = {
+            "status": "running",
+            "logs": [],
+            "file": None,
+            "error": None,
+        }
 
-if __name__ == '__main__':
-    # For local development use app.run(debug=True)
-    # For Render, use Waitress
-    serve(app, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+    # Save upload into a temp dir before starting the thread
+    temp_dir = tempfile.mkdtemp(prefix=f"job_{job_id}_")
+    input_path = os.path.join(temp_dir, file.filename)
+    output_dir = os.path.join(temp_dir, "output")
+    os.makedirs(output_dir, exist_ok=True)
+    file.save(input_path)
+
+    log.info("Job %s started | file=%s | temp=%s", job_id, file.filename, temp_dir)
+
+    t = threading.Thread(
+        target=_run_job,
+        args=(job_id, input_path, output_dir),
+        daemon=True,
+    )
+    t.start()
+
+    return redirect(url_for("job_view", job_id=job_id))
+
+
+@app.route("/job/<job_id>")
+def job_view(job_id):
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            abort(404)
+        log_text = "\n".join(job["logs"])
+        # Pass a shallow copy so template can read status/error
+        job_view_data = {
+            "status": job["status"],
+            "error": job["error"],
+        }
+    return render_template_string(JOB_HTML, job_id=job_id, job=job_view_data, log_text=log_text)
+
+
+@app.route("/download/<job_id>")
+def download(job_id):
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job or not job["file"]:
+            abort(404)
+        path = job["file"]
+    return send_file(
+        path,
+        as_attachment=True,
+        download_name=os.path.basename(path),
+    )
+
+
+# ---------------- worker ----------------
+def _run_job(job_id, input_path, output_dir):
+    def job_log(msg):
+        msg = str(msg)
+        with JOBS_LOCK:
+            JOBS[job_id]["logs"].append(msg)
+        # Also push to stdout so it appears in Render logs
+        log.info("[job %s] %s", job_id, msg)
+
+    try:
+        output_excel = process_excel(input_path, output_dir, log_func=job_log)
+        with JOBS_LOCK:
+            JOBS[job_id]["file"] = output_excel
+            JOBS[job_id]["status"] = "done"
+        log.info("Job %s finished: %s", job_id, output_excel)
+    except Exception as e:
+        tb = traceback.format_exc()
+        log.error("Job %s failed: %s\n%s", job_id, e, tb)
+        with JOBS_LOCK:
+            JOBS[job_id]["status"] = "error"
+            JOBS[job_id]["error"] = f"{type(e).__name__}: {e}"
+            JOBS[job_id]["logs"].append(tb)
+
+
+# ---------------- entrypoint ----------------
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    log.info("Starting Waitress on 0.0.0.0:%d | market=%s country=%s",
+             port,
+             os.environ.get("BING_MARKET", "nl-NL"),
+             os.environ.get("BING_COUNTRY", "NL"))
+    serve(app, host="0.0.0.0", port=port)

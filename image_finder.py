@@ -20,6 +20,10 @@ from openpyxl.drawing.xdr import XDRPositiveSize2D
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+import logging
+
+log = logging.getLogger("image_finder")
+
 # ============================================================
 # SETTINGS
 # ============================================================
@@ -36,10 +40,14 @@ HEADERS = {
 
 VERIFY_SSL = False
 
+# Bing market/country for image search.  Change to match your target region
+# (e.g. "nl-NL" / "NL" for Netherlands, "de-DE" / "DE" for Germany,
+#  "es-ES" / "ES" for Spain).
+BING_MARKET = os.environ.get("BING_MARKET", "nl-NL")
+BING_COUNTRY = os.environ.get("BING_COUNTRY", "NL")
+
 if not VERIFY_SSL:
-    urllib3.disable_warnings(
-        urllib3.exceptions.InsecureRequestWarning
-    )
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 SIZE_PATTERN = re.compile(
     r"\b(?:XS|S|M|L|XL|XXL|XXXL|2XL|3XL)\b",
@@ -73,6 +81,21 @@ def make_session():
     )
     session.mount("http://", adapter)
     session.mount("https://", adapter)
+
+    # --- Warm up: get consent cookies so Bing serves the real results page ---
+    try:
+        session.get(
+            "https://www.bing.com/",
+            timeout=15,
+            verify=VERIFY_SSL,
+        )
+        # Pre-accept the consent cookie Bing uses in the EU
+        session.cookies.set("SRCHHPGUSR", "SRCHLANG=en&BRW=W&BRHW=H", domain=".bing.com")
+        session.cookies.set("_EDGE_S", f"mkt={BING_MARKET}", domain=".bing.com")
+        log.info("Bing session warmed up (market=%s, country=%s)", BING_MARKET, BING_COUNTRY)
+    except Exception as e:
+        log.warning("Bing warm-up failed: %s", e)
+
     return session
 
 # ============================================================
@@ -141,17 +164,33 @@ def search_bing_images(query, session, max_results=12):
     try:
         r = session.get(
             "https://www.bing.com/images/search",
-            params={"q": query},
+            params={
+                "q": query,
+                "cc": BING_COUNTRY,
+                "setmkt": BING_MARKET,
+                "setlang": "en",
+                "form": "HDRSC2",
+                "first": 1,
+            },
             timeout=20,
             allow_redirects=True,
             headers=HEADERS,
             verify=VERIFY_SSL,
         )
+
+        log.info("  Bing HTTP %s | final=%s | bytes=%d",
+                 r.status_code, r.url, len(r.text))
+
         if r.status_code != 200:
+            log.warning("  Bing returned non-200 (%s)", r.status_code)
             return []
+
         matches = re.findall(r'murl&quot;:&quot;(.*?)&quot;', r.text)
         if not matches:
             matches = re.findall(r'"murl":"(.*?)"', r.text)
+
+        log.info("  Regex found %d raw murl matches", len(matches))
+
         urls = []
         for m in matches:
             u = normalize_url(m)
@@ -159,28 +198,30 @@ def search_bing_images(query, session, max_results=12):
                 urls.append(u)
             if len(urls) >= max_results:
                 break
+
+        log.info("  Returning %d unique candidate URLs", len(urls))
         return urls
-    except Exception:
+    except Exception as e:
+        log.warning("  search_bing_images exception: %s", e)
         return []
 
 def find_candidate_urls_bing(query, session, log_func=None):
-    def log(msg):
+    def _log(msg):
         if log_func:
             log_func(msg)
-        else:
-            print(msg)
+        log.info(msg)
 
     all_candidates = []
     variants = build_query_variants(query)
     for q in variants:
-        log(f" Trying query: {q}")
+        _log(f" Trying query: {q}")
         candidates = search_bing_images(q, session=session, max_results=12)
         if not candidates:
-            log(" No results")
+            _log(" No results")
             continue
         for idx, url in enumerate(candidates, start=1):
             short_url = url[:120] + ("..." if len(url) > 120 else "")
-            log(f" Candidate {idx}: {short_url}")
+            _log(f" Candidate {idx}: {short_url}")
             if url not in all_candidates:
                 all_candidates.append(url)
     return all_candidates
@@ -190,11 +231,10 @@ def find_candidate_urls_bing(query, session, log_func=None):
 # ============================================================
 
 def download_image_to_png(url, out_path, session, log_func=None):
-    def log(msg):
+    def _log(msg):
         if log_func:
             log_func(msg)
-        else:
-            print(msg)
+        log.info(msg)
 
     try:
         headers = build_request_headers_for_url(url)
@@ -205,25 +245,26 @@ def download_image_to_png(url, out_path, session, log_func=None):
             headers=headers,
             verify=VERIFY_SSL
         )
-        log(f" HTTP {r.status_code} | content-type={r.headers.get('Content-Type')}")
+        _log(f" HTTP {r.status_code} | content-type={r.headers.get('Content-Type')} | bytes={len(r.content)}")
         if r.status_code != 200:
             return False
         img = Image.open(BytesIO(r.content))
         img.load()
+        _log(f" Image opened: size={img.size}, mode={img.mode}, format={img.format}")
         img = img.convert("RGB")
         img.save(out_path, format="PNG")
         return True
     except UnidentifiedImageError as e:
-        log(f" PIL could not identify image: {e}")
+        _log(f" PIL could not identify image: {e}")
         return False
     except requests.exceptions.SSLError as e:
-        log(f" SSL error: {e}")
+        _log(f" SSL error: {e}")
         return False
     except requests.exceptions.RequestException as e:
-        log(f" Request error: {e}")
+        _log(f" Request error: {e}")
         return False
     except Exception as e:
-        log(f" Other error: {type(e).__name__}: {e}")
+        _log(f" Other error: {type(e).__name__}: {e}")
         return False
 
 # ============================================================
@@ -245,11 +286,10 @@ def resize_image_keep_ratio(img_path, max_w=144, max_h=135):
 # ============================================================
 
 def write_excel_with_embedded_images(excel_path, rows_data, log_func=None):
-    def log(msg):
+    def _log(msg):
         if log_func:
             log_func(msg)
-        else:
-            print(msg)
+        log.info(msg)
 
     wb = Workbook()
     ws = wb.active
@@ -301,9 +341,9 @@ def write_excel_with_embedded_images(excel_path, rows_data, log_func=None):
             size = XDRPositiveSize2D(cx=actual_w * 9525, cy=actual_h * 9525)
             xl_img.anchor = OneCellAnchor(_from=marker, ext=size)
             ws.add_image(xl_img)
-            log(f"Embedded image in row {i}")
+            _log(f"Embedded image in row {i}")
         except Exception as e:
-            log(f"Could not embed image in row {i}: {e}")
+            _log(f"Could not embed image in row {i}: {e}")
 
     wb.save(excel_path)
 
@@ -312,11 +352,10 @@ def write_excel_with_embedded_images(excel_path, rows_data, log_func=None):
 # ============================================================
 
 def process_excel(input_file, output_dir, log_func=None):
-    def log(msg):
+    def _log(msg):
         if log_func:
             log_func(msg)
-        else:
-            print(msg)
+        log.info(msg)
 
     if not os.path.exists(input_file):
         raise FileNotFoundError(f"Input file not found: {input_file}")
@@ -328,7 +367,7 @@ def process_excel(input_file, output_dir, log_func=None):
     images_dir = os.path.join(output_dir, f"{base_name}_images")
     os.makedirs(images_dir, exist_ok=True)
 
-    log("Reading Excel file...")
+    _log("Reading Excel file...")
     df_raw = pd.read_excel(input_file, header=None)
     if df_raw.empty:
         raise ValueError("The Excel file is empty.")
@@ -340,19 +379,19 @@ def process_excel(input_file, output_dir, log_func=None):
 
     refs_list = references.tolist()
     total = len(refs_list)
-    log(f"Processing {total} article(s)...")
+    _log(f"Processing {total} article(s)...")
 
     session = make_session()
     success_cache = {}
     rows_data = []
 
     for i, ref in enumerate(refs_list, start=1):
-        log(f"[{i}/{total}] Searching: {ref}")
+        _log(f"[{i}/{total}] Searching: {ref}")
         cache_key = build_cache_key(ref)
 
         if cache_key in success_cache:
             cached = success_cache[cache_key]
-            log(f" Reused successful cached image for: {cache_key}")
+            _log(f" Reused successful cached image for: {cache_key}")
             rows_data.append({
                 "Reference": ref,
                 "ChosenURL": cached["url"],
@@ -360,29 +399,29 @@ def process_excel(input_file, output_dir, log_func=None):
             })
             continue
 
-        candidates = find_candidate_urls_bing(ref, session=session, log_func=log)
+        candidates = find_candidate_urls_bing(ref, session=session, log_func=_log)
         chosen_url = ""
         local_img_path = ""
 
         if candidates:
-            log(" Trying candidate downloads...")
+            _log(" Trying candidate downloads...")
             for idx, url in enumerate(candidates, start=1):
                 short_url = url[:120] + ("..." if len(url) > 120 else "")
-                log(f" Download candidate {idx}: {short_url}")
+                _log(f" Download candidate {idx}: {short_url}")
                 temp_img_path = os.path.join(images_dir, f"row_{i}.png")
-                if download_image_to_png(url, temp_img_path, session, log_func=log):
+                if download_image_to_png(url, temp_img_path, session, log_func=_log):
                     chosen_url = url
                     local_img_path = temp_img_path
-                    log(" Accepted and downloaded")
+                    _log(" Accepted and downloaded")
                     success_cache[cache_key] = {
                         "url": chosen_url,
                         "local_path": local_img_path,
                     }
                     break
                 else:
-                    log(" Failed")
+                    _log(" Failed")
         else:
-            log(" No candidates found")
+            _log(" No candidates found")
 
         rows_data.append({
             "Reference": ref,
@@ -391,7 +430,7 @@ def process_excel(input_file, output_dir, log_func=None):
         })
         time.sleep(0.05)
 
-    log("Writing Excel file and embedding images...")
-    write_excel_with_embedded_images(output_excel, rows_data, log_func=log)
-    log(f"Done: {output_excel}")
+    _log("Writing Excel file and embedding images...")
+    write_excel_with_embedded_images(output_excel, rows_data, log_func=_log)
+    _log(f"Done: {output_excel}")
     return output_excel
