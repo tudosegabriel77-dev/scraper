@@ -1,0 +1,8 @@
+pandas
+requests
+urllib3
+pillow
+openpyxl
+deep-translator
+duckduckgo-search==8.1.1
+beautifulsoup4
