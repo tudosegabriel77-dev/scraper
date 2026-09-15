@@ -38,18 +38,7 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-VERIFY_SSL = True
-
-# ---- Optional residential proxy for Bing search ----
-# Set PROXY_URL in Render env vars, e.g.
-#   http://user:pass@gate.smartproxy.com:7000
-#   http://user:pass@brd.superproxy.io:22225
-# Leave empty to run without a proxy (same as local).
-PROXY_URL = os.environ.get("PROXY_URL", "").strip() or None
-
-# Bing market/country — matches the region your proxy exits from.
-BING_MARKET = os.environ.get("BING_MARKET", "nl-NL")
-BING_COUNTRY = os.environ.get("BING_COUNTRY", "NL")
+VERIFY_SSL = False
 
 if not VERIFY_SSL:
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -74,15 +63,6 @@ def make_session():
     session = requests.Session()
     session.headers.update(HEADERS)
 
-    if PROXY_URL:
-        session.proxies.update({
-            "http": PROXY_URL,
-            "https": PROXY_URL,
-        })
-        log.info("Using proxy for HTTP(S) traffic")
-    else:
-        log.info("No proxy configured — running direct (datacenter IP)")
-
     retries = Retry(
         total=2,
         backoff_factor=0.4,
@@ -97,19 +77,17 @@ def make_session():
     session.mount("http://", adapter)
     session.mount("https://", adapter)
 
-    # Warm up: get consent cookies, mimic a real browser session
+    # Warm up Bing so consent cookies are set for the proxy IP
     try:
         session.get("https://www.bing.com/", timeout=20, verify=VERIFY_SSL)
-        session.cookies.set("SRCHHPGUSR", "SRCHLANG=en&BRW=W&BRHW=H", domain=".bing.com")
-        session.cookies.set("_EDGE_S", f"mkt={BING_MARKET}", domain=".bing.com")
-        log.info("Bing session warmed up (market=%s, country=%s)", BING_MARKET, BING_COUNTRY)
+        log.info("Bing homepage warm-up done")
     except Exception as e:
         log.warning("Bing warm-up failed: %s", e)
 
     return session
 
 # ============================================================
-# TEXT / QUERY HELPERS  (unchanged from your original)
+# TEXT / QUERY HELPERS
 # ============================================================
 
 def normalize_spaces(text):
@@ -174,26 +152,16 @@ def search_bing_images(query, session, max_results=12):
     try:
         r = session.get(
             "https://www.bing.com/images/search",
-            params={
-                "q": query,
-                "cc": BING_COUNTRY,
-                "setmkt": BING_MARKET,
-                "setlang": "en",
-                "form": "HDRSC2",
-                "first": 1,
-            },
-            timeout=25,
+            params={"q": query},
+            timeout=20,
             allow_redirects=True,
             headers=HEADERS,
             verify=VERIFY_SSL,
         )
-        log.info("  DEBUG: response length=%d | first 500 chars: %s", len(r.text), r.text[:500])
 
-        log.info("  Bing HTTP %s | final=%s | bytes=%d",
-                 r.status_code, r.url, len(r.text))
+        log.info("  Bing HTTP %s | bytes=%d", r.status_code, len(r.text))
 
         if r.status_code != 200:
-            log.warning("  Bing returned non-200 (%s)", r.status_code)
             return []
 
         matches = re.findall(r'murl&quot;:&quot;(.*?)&quot;', r.text)
@@ -210,7 +178,6 @@ def search_bing_images(query, session, max_results=12):
             if len(urls) >= max_results:
                 break
 
-        log.info("  Returning %d unique candidate URLs", len(urls))
         return urls
     except Exception as e:
         log.warning("  search_bing_images exception: %s", e)
@@ -251,17 +218,16 @@ def download_image_to_png(url, out_path, session, log_func=None):
         headers = build_request_headers_for_url(url)
         r = session.get(
             url,
-            timeout=30,
+            timeout=25,
             allow_redirects=True,
             headers=headers,
             verify=VERIFY_SSL
         )
-        _log(f" HTTP {r.status_code} | content-type={r.headers.get('Content-Type')} | bytes={len(r.content)}")
+        _log(f" HTTP {r.status_code} | content-type={r.headers.get('Content-Type')}")
         if r.status_code != 200:
             return False
         img = Image.open(BytesIO(r.content))
         img.load()
-        _log(f" Image opened: size={img.size}, mode={img.mode}, format={img.format}")
         img = img.convert("RGB")
         img.save(out_path, format="PNG")
         return True

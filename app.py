@@ -17,10 +17,16 @@ PROXY_USER = os.environ.get("PROXY_USER", "").strip()
 PROXY_PASS = os.environ.get("PROXY_PASS", "").strip()
 
 if TUNNEL_URL and PROXY_USER and PROXY_PASS:
-    host = TUNNEL_URL.replace("https://", "").replace("http://", "").rstrip("/")
     user = quote(PROXY_USER, safe="")
     passwd = quote(PROXY_PASS, safe="")
-    proxy_url = f"socks5://{user}:{passwd}@{host}"
+
+    if TUNNEL_URL.startswith("tcp://"):
+        hostport = TUNNEL_URL[len("tcp://"):].rstrip("/")
+    else:
+        hostport = TUNNEL_URL.replace("https://", "").replace("http://", "").rstrip("/")
+
+    # socks5h -> DNS resolved by the proxy (phone), not by Render
+    proxy_url = f"socks5h://{user}:{passwd}@{hostport}"
     os.environ["HTTP_PROXY"] = proxy_url
     os.environ["HTTPS_PROXY"] = proxy_url
     os.environ["ALL_PROXY"] = proxy_url
@@ -33,13 +39,12 @@ logging.basicConfig(
 log = logging.getLogger("app")
 
 if TUNNEL_URL and PROXY_USER and PROXY_PASS:
-    log.info("Proxy configured: socks5://%s@%s", PROXY_USER, TUNNEL_URL)
+    log.info("Proxy configured: socks5h://%s@%s", PROXY_USER, TUNNEL_URL)
 else:
     log.info("No proxy configured — running direct")
 
 app = Flask(__name__)
 
-# In-memory job store. Fine for a single-instance Render service.
 JOBS = {}
 JOBS_LOCK = threading.Lock()
 
