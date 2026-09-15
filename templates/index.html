@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <title>Image Finder</title>
+
+    <style>
+
+        body {
+            font-family: Arial, sans-serif;
+            background: #f4f4f4;
+            margin: 0;
+            padding: 30px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: auto;
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+        }
+
+        h1 {
+            margin-top: 0;
+        }
+
+        .field {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 7px;
+            font-weight: bold;
+        }
+
+        input,
+        select {
+            width: 100%;
+            padding: 10px;
+            box-sizing: border-box;
+        }
+
+        button {
+            padding: 12px 25px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+
+        .checkbox {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .checkbox input {
+            width: auto;
+        }
+
+        #log {
+            margin-top: 20px;
+            background: #111;
+            color: #eee;
+            padding: 15px;
+            height: 400px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            font-family: Consolas, monospace;
+        }
+
+        #download {
+            display: none;
+            margin-top: 20px;
+        }
+
+    </style>
+
+</head>
+
+
+<body>
+
+<div class="container">
+
+    <h1>Excel Article → Image Finder</h1>
+
+    <form id="form">
+
+        <div class="field">
+
+            <label>
+                Input Excel file
+            </label>
+
+            <input
+                type="file"
+                name="file"
+                accept=".xlsx,.xls"
+                required
+            >
+
+        </div>
+
+
+        <div class="field">
+
+            <label>
+                Listing language
+            </label>
+
+            <select name="listing_language">
+
+                <option value="english">
+                    English
+                </option>
+
+                <option value="spanish">
+                    Spanish
+                </option>
+
+                <option value="italian">
+                    Italian
+                </option>
+
+            </select>
+
+        </div>
+
+
+        <div class="field checkbox">
+
+            <input
+                type="checkbox"
+                id="translate"
+            >
+
+            <label for="translate">
+                Translate to English before searching
+            </label>
+
+        </div>
+
+
+        <div class="field">
+
+            <label>
+                Brand filter
+            </label>
+
+            <input
+                type="text"
+                name="brand_filter"
+                placeholder="Optional"
+            >
+
+        </div>
+
+
+        <div class="field">
+
+            <label>
+                Site filter
+            </label>
+
+            <input
+                type="text"
+                name="site_filter"
+                placeholder="Optional, e.g. example.com"
+            >
+
+        </div>
+
+
+        <button type="submit" id="runButton">
+            START
+        </button>
+
+    </form>
+
+
+    <h3>Status</h3>
+
+    <div id="log">
+Waiting...
+    </div>
+
+
+    <a
+        id="download"
+        href="#"
+    >
+
+        <button>
+            Download Excel
+        </button>
+
+    </a>
+
+</div>
+
+
+<script>
+
+const form = document.getElementById("form");
+const logBox = document.getElementById("log");
+const runButton = document.getElementById("runButton");
+const download = document.getElementById("download");
+
+
+form.addEventListener("submit", async function(event) {
+
+    event.preventDefault();
+
+    runButton.disabled = true;
+    download.style.display = "none";
+
+    logBox.textContent = "Uploading...\n";
+
+    const formData = new FormData(form);
+
+    formData.append(
+        "translate_to_english",
+        document.getElementById("translate").checked
+    );
+
+
+    const response = await fetch(
+        "/start",
+        {
+            method: "POST",
+            body: formData
+        }
+    );
+
+
+    const data = await response.json();
+
+
+    if (!response.ok) {
+
+        logBox.textContent =
+            "ERROR: " + data.error;
+
+        runButton.disabled = false;
+
+        return;
+    }
+
+
+    checkStatus(data.job_id);
+
+});
+
+
+async function checkStatus(jobId) {
+
+    const response = await fetch(
+        "/status/" + jobId
+    );
+
+    const data = await response.json();
+
+
+    logBox.textContent =
+        data.logs.join("\n");
+
+
+    logBox.scrollTop =
+        logBox.scrollHeight;
+
+
+    if (data.status === "running" ||
+        data.status === "starting") {
+
+        setTimeout(
+            () => checkStatus(jobId),
+            500
+        );
+
+        return;
+    }
+
+
+    if (data.status === "completed") {
+
+        logBox.textContent +=
+            "\n\nDONE!";
+
+        download.href =
+            "/download/" + jobId;
+
+        download.style.display =
+            "block";
+
+        runButton.disabled =
+            false;
+
+        return;
+    }
+
+
+    if (data.status === "error") {
+
+        logBox.textContent +=
+            "\n\nERROR: " + data.error;
+
+        runButton.disabled =
+            false;
+
+    }
+
+}
+
+</script>
+
+</body>
+
+</html>
