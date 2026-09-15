@@ -26,7 +26,7 @@ if TUNNEL_URL and PROXY_USER and PROXY_PASS:
         hostport = TUNNEL_URL.replace("https://", "").replace("http://", "").rstrip("/")
 
     # socks5h -> DNS resolved by the proxy (phone), not by Render
-    proxy_url = f"socks5h://{user}:{passwd}@{hostport}"
+    proxy_url = f"http://{user}:{passwd}@{hostport}"
     os.environ["HTTP_PROXY"] = proxy_url
     os.environ["HTTPS_PROXY"] = proxy_url
     os.environ["ALL_PROXY"] = proxy_url
