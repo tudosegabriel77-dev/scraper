@@ -187,6 +187,7 @@ def search_bing_images(query, session, max_results=12):
             headers=HEADERS,
             verify=VERIFY_SSL,
         )
+        log.info("  DEBUG: response length=%d | first 500 chars: %s", len(r.text), r.text[:500])
 
         log.info("  Bing HTTP %s | final=%s | bytes=%d",
                  r.status_code, r.url, len(r.text))
