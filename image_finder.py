@@ -40,9 +40,14 @@ HEADERS = {
 
 VERIFY_SSL = False
 
-# Bing market/country for image search.  Change to match your target region
-# (e.g. "nl-NL" / "NL" for Netherlands, "de-DE" / "DE" for Germany,
-#  "es-ES" / "ES" for Spain).
+# ---- Optional residential proxy for Bing search ----
+# Set PROXY_URL in Render env vars, e.g.
+#   http://user:pass@gate.smartproxy.com:7000
+#   http://user:pass@brd.superproxy.io:22225
+# Leave empty to run without a proxy (same as local).
+PROXY_URL = os.environ.get("PROXY_URL", "").strip() or None
+
+# Bing market/country — matches the region your proxy exits from.
 BING_MARKET = os.environ.get("BING_MARKET", "nl-NL")
 BING_COUNTRY = os.environ.get("BING_COUNTRY", "NL")
 
@@ -68,6 +73,16 @@ SIZE_RANGE_PATTERN = re.compile(
 def make_session():
     session = requests.Session()
     session.headers.update(HEADERS)
+
+    if PROXY_URL:
+        session.proxies.update({
+            "http": PROXY_URL,
+            "https": PROXY_URL,
+        })
+        log.info("Using proxy for HTTP(S) traffic")
+    else:
+        log.info("No proxy configured — running direct (datacenter IP)")
+
     retries = Retry(
         total=2,
         backoff_factor=0.4,
@@ -82,14 +97,9 @@ def make_session():
     session.mount("http://", adapter)
     session.mount("https://", adapter)
 
-    # --- Warm up: get consent cookies so Bing serves the real results page ---
+    # Warm up: get consent cookies, mimic a real browser session
     try:
-        session.get(
-            "https://www.bing.com/",
-            timeout=15,
-            verify=VERIFY_SSL,
-        )
-        # Pre-accept the consent cookie Bing uses in the EU
+        session.get("https://www.bing.com/", timeout=20, verify=VERIFY_SSL)
         session.cookies.set("SRCHHPGUSR", "SRCHLANG=en&BRW=W&BRHW=H", domain=".bing.com")
         session.cookies.set("_EDGE_S", f"mkt={BING_MARKET}", domain=".bing.com")
         log.info("Bing session warmed up (market=%s, country=%s)", BING_MARKET, BING_COUNTRY)
@@ -99,7 +109,7 @@ def make_session():
     return session
 
 # ============================================================
-# TEXT / QUERY HELPERS
+# TEXT / QUERY HELPERS  (unchanged from your original)
 # ============================================================
 
 def normalize_spaces(text):
@@ -172,7 +182,7 @@ def search_bing_images(query, session, max_results=12):
                 "form": "HDRSC2",
                 "first": 1,
             },
-            timeout=20,
+            timeout=25,
             allow_redirects=True,
             headers=HEADERS,
             verify=VERIFY_SSL,
@@ -240,7 +250,7 @@ def download_image_to_png(url, out_path, session, log_func=None):
         headers = build_request_headers_for_url(url)
         r = session.get(
             url,
-            timeout=25,
+            timeout=30,
             allow_redirects=True,
             headers=headers,
             verify=VERIFY_SSL
