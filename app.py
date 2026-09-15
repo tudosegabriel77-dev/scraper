@@ -4,11 +4,26 @@ import logging
 import threading
 import tempfile
 import traceback
+from urllib.parse import quote
 
 from flask import Flask, request, send_file, render_template_string, redirect, url_for, abort
 from waitress import serve
 
 from image_finder import process_excel
+
+# ---------------- Proxy configuration (from env vars) ----------------
+TUNNEL_URL = os.environ.get("PROXY_TUNNEL_URL", "").strip()
+PROXY_USER = os.environ.get("PROXY_USER", "").strip()
+PROXY_PASS = os.environ.get("PROXY_PASS", "").strip()
+
+if TUNNEL_URL and PROXY_USER and PROXY_PASS:
+    host = TUNNEL_URL.replace("https://", "").replace("http://", "").rstrip("/")
+    user = quote(PROXY_USER, safe="")
+    passwd = quote(PROXY_PASS, safe="")
+    proxy_url = f"socks5://{user}:{passwd}@{host}"
+    os.environ["HTTP_PROXY"] = proxy_url
+    os.environ["HTTPS_PROXY"] = proxy_url
+    os.environ["ALL_PROXY"] = proxy_url
 
 # ---------------- logging to stdout (shows in Render logs) ----------------
 logging.basicConfig(
@@ -17,10 +32,14 @@ logging.basicConfig(
 )
 log = logging.getLogger("app")
 
+if TUNNEL_URL and PROXY_USER and PROXY_PASS:
+    log.info("Proxy configured: socks5://%s@%s", PROXY_USER, TUNNEL_URL)
+else:
+    log.info("No proxy configured — running direct")
+
 app = Flask(__name__)
 
 # In-memory job store. Fine for a single-instance Render service.
-# Each job: {"status": str, "logs": [str], "file": path|None, "error": str|None}
 JOBS = {}
 JOBS_LOCK = threading.Lock()
 
@@ -97,7 +116,6 @@ def process():
             "error": None,
         }
 
-    # Save upload into a temp dir before starting the thread
     temp_dir = tempfile.mkdtemp(prefix=f"job_{job_id}_")
     input_path = os.path.join(temp_dir, file.filename)
     output_dir = os.path.join(temp_dir, "output")
@@ -123,7 +141,6 @@ def job_view(job_id):
         if not job:
             abort(404)
         log_text = "\n".join(job["logs"])
-        # Pass a shallow copy so template can read status/error
         job_view_data = {
             "status": job["status"],
             "error": job["error"],
@@ -151,7 +168,6 @@ def _run_job(job_id, input_path, output_dir):
         msg = str(msg)
         with JOBS_LOCK:
             JOBS[job_id]["logs"].append(msg)
-        # Also push to stdout so it appears in Render logs
         log.info("[job %s] %s", job_id, msg)
 
     try:
@@ -172,8 +188,5 @@ def _run_job(job_id, input_path, output_dir):
 # ---------------- entrypoint ----------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    log.info("Starting Waitress on 0.0.0.0:%d | market=%s country=%s",
-             port,
-             os.environ.get("BING_MARKET", "nl-NL"),
-             os.environ.get("BING_COUNTRY", "NL"))
+    log.info("Starting Waitress on 0.0.0.0:%d", port)
     serve(app, host="0.0.0.0", port=port)
